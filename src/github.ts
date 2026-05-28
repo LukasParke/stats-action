@@ -164,6 +164,15 @@ type ContributionsCollectionWithRepositories = ContributionsCollection & {
   };
 };
 
+type ContributionRepositoryEnrichment = Pick<
+  ContributionsCollectionWithRepositories,
+  | "commitContributionsByRepository"
+  | "issueContributionsByRepository"
+  | "pullRequestContributionsByRepository"
+  | "pullRequestReviewContributionsByRepository"
+  | "repositoryContributions"
+>;
+
 export async function collectProfile(
   octokit: Octokit,
   scheduler: RequestScheduler
@@ -658,17 +667,66 @@ async function fetchContributionYear(
       ? new Date().toISOString()
       : `${year + 1}-01-01T00:00:00.000Z`;
 
+  const data = await fetchContributionYearCore(
+    octokit,
+    scheduler,
+    from,
+    to,
+    year
+  );
+  const fetchedAt = Date.now();
+  let summaries: RepositoryContributionSummary[] = [];
+  let repositories: RepositoryRecord[] = [];
+
+  try {
+    const enrichment = await fetchContributionYearRepositoryEnrichment(
+      octokit,
+      scheduler,
+      from,
+      to,
+      year
+    );
+    const extracted = extractContributionRepositories(enrichment, fetchedAt);
+    summaries = extracted.summaries;
+    repositories = extracted.repositories;
+  } catch (error) {
+    console.warn(
+      `Skipped repository contribution enrichment for ${year}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+
+  return {
+    year: String(year),
+    from,
+    to,
+    fetchedAt,
+    immutable: year < currentYear - 1,
+    data,
+    repositoryContributions: summaries,
+    repositories,
+  };
+}
+
+async function fetchContributionYearCore(
+  octokit: Octokit,
+  scheduler: RequestScheduler,
+  from: string,
+  to: string,
+  year: number
+): Promise<ContributionsCollection> {
   const response = await scheduler.graphql(
-    `contribution year ${year}`,
+    `contribution year ${year} core`,
     () =>
       octokit.graphql<
         GraphQLResponse<{
           viewer: {
-            contributionsCollection: ContributionsCollectionWithRepositories;
+            contributionsCollection: ContributionsCollection;
           };
         }>
       >(
-        `query contributionYear($from: DateTime!, $to: DateTime!) {
+        `query contributionYearCore($from: DateTime!, $to: DateTime!) {
           viewer {
             contributionsCollection(from: $from, to: $to) {
               totalCommitContributions
@@ -686,6 +744,38 @@ async function fetchContributionYear(
                   }
                 }
               }
+            }
+          }
+          ${RATE_LIMIT_FIELDS}
+        }`,
+        { from, to }
+      ),
+    false
+  );
+
+  return response.viewer.contributionsCollection;
+}
+
+async function fetchContributionYearRepositoryEnrichment(
+  octokit: Octokit,
+  scheduler: RequestScheduler,
+  from: string,
+  to: string,
+  year: number
+): Promise<ContributionRepositoryEnrichment> {
+  const response = await scheduler.graphql(
+    `contribution year ${year} repository enrichment`,
+    () =>
+      octokit.graphql<
+        GraphQLResponse<{
+          viewer: {
+            contributionsCollection: ContributionRepositoryEnrichment;
+          };
+        }>
+      >(
+        `query contributionYearRepositoryEnrichment($from: DateTime!, $to: DateTime!) {
+          viewer {
+            contributionsCollection(from: $from, to: $to) {
               commitContributionsByRepository(maxRepositories: 100) {
                 repository {
                   ${REPO_FIELDS}
@@ -736,27 +826,15 @@ async function fetchContributionYear(
         }`,
         { from, to }
       ),
-    false
+    true,
+    2
   );
 
-  const collection = response.viewer.contributionsCollection;
-  const fetchedAt = Date.now();
-  const { summaries, repositories } = extractContributionRepositories(collection, fetchedAt);
-
-  return {
-    year: String(year),
-    from,
-    to,
-    fetchedAt,
-    immutable: year < currentYear - 1,
-    data: stripContributionRepositoryFields(collection),
-    repositoryContributions: summaries,
-    repositories,
-  };
+  return response.viewer.contributionsCollection;
 }
 
 function extractContributionRepositories(
-  collection: ContributionsCollectionWithRepositories,
+  collection: ContributionRepositoryEnrichment,
   fetchedAt: number
 ): {
   summaries: RepositoryContributionSummary[];
@@ -808,21 +886,6 @@ function extractContributionRepositories(
     repositories: mergeRepositories(repositories),
   };
 }
-
-function stripContributionRepositoryFields(
-  collection: ContributionsCollectionWithRepositories
-): ContributionsCollection {
-  return {
-    totalCommitContributions: collection.totalCommitContributions,
-    restrictedContributionsCount: collection.restrictedContributionsCount,
-    totalIssueContributions: collection.totalIssueContributions,
-    totalRepositoryContributions: collection.totalRepositoryContributions,
-    totalPullRequestContributions: collection.totalPullRequestContributions,
-    totalPullRequestReviewContributions: collection.totalPullRequestReviewContributions,
-    contributionCalendar: collection.contributionCalendar,
-  };
-}
-
 async function materializeDiscoveredRepositories(
   octokit: Octokit,
   scheduler: RequestScheduler,

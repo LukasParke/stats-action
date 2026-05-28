@@ -147,6 +147,14 @@ Historical contribution years older than the previous year are treated as
 immutable when cached. Current and previous years are refreshed by default.
 Expensive REST work is queued and resumed across scheduled runs.
 
+## Reliability Notes
+
+GitHub can occasionally return transient `502 Bad Gateway` responses from
+GraphQL. Core contribution totals and calendar data are fetched through a small
+required query with retries. Heavier per-repository contribution enrichment is
+fetched separately and treated as optional, so a transient failure there should
+not make an entire contribution year disappear from the output.
+
 ## Local Development
 
 ```bash

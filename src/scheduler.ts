@@ -44,22 +44,42 @@ export class RequestScheduler {
   async graphql<T extends { rateLimit?: RateLimitInfo }>(
     label: string,
     request: () => Promise<T>,
-    optional = false
+    optional = false,
+    retries = 3
   ): Promise<T> {
     if (optional && !this.shouldStartOptional("graphql")) {
       throw new BudgetStoppedError(`GraphQL budget exhausted before ${label}`);
     }
 
-    const response = await request();
-    if (response.rateLimit) {
-      this.graphqlRateLimit = response.rateLimit;
-      if (response.rateLimit.remaining <= this.config.minGraphqlRemaining) {
+    let attempt = 0;
+    while (true) {
+      try {
+        const response = await request();
+        if (response.rateLimit) {
+          this.graphqlRateLimit = response.rateLimit;
+          if (response.rateLimit.remaining <= this.config.minGraphqlRemaining) {
+            this.warnings.push(
+              `GraphQL budget near threshold after ${label}: ${response.rateLimit.remaining} remaining`
+            );
+          }
+        }
+        return response;
+      } catch (error) {
+        const status = getErrorStatus(error);
+        const retryAfterMs = getRetryAfterMs(error);
+        if (attempt >= retries || !isRetryableGraphQLError(status, error)) {
+          throw error;
+        }
+
+        attempt++;
+        const backoffMs =
+          retryAfterMs ?? Math.min(30000, 1000 * Math.pow(2, attempt - 1));
         this.warnings.push(
-          `GraphQL budget near threshold after ${label}: ${response.rateLimit.remaining} remaining`
+          `${label} GraphQL request returned ${status ?? "transient error"}; retrying in ${Math.round(backoffMs)}ms`
         );
+        await delay(backoffMs + Math.floor(Math.random() * 250));
       }
     }
-    return response;
   }
 
   async rest<T extends { headers?: Record<string, string | number | undefined>; status?: number }>(
@@ -189,4 +209,10 @@ function getRetryAfterMs(error: unknown): number | null {
 
 function isRetryableStatus(status: number | null): boolean {
   return status === 403 || status === 429 || status === 500 || status === 502 || status === 503;
+}
+
+function isRetryableGraphQLError(status: number | null, error: unknown): boolean {
+  if (isRetryableStatus(status) || status === 504) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|nginx/i.test(message);
 }
