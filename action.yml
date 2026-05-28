@@ -1,5 +1,5 @@
 name: "profile-stats"
-description: "retrieve github profile stats and save locally to repo for further processing"
+description: "Collect public-safe GitHub profile stats with caching and resumable backfill"
 branding:
   icon: "bar-chart-2"
   color: "blue"

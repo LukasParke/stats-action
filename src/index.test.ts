@@ -371,11 +371,11 @@ describe("v2 collection helpers", () => {
   ): RepositoryRecord => ({
     id: "R_1",
     name: "stats-action",
-    nameWithOwner: "LukeHagar/stats-action",
-    owner: "LukeHagar",
+    nameWithOwner: "LukasParke/stats-action",
+    owner: "LukasParke",
     ownerType: "User",
     description: null,
-    url: "https://github.com/LukeHagar/stats-action",
+    url: "https://github.com/LukasParke/stats-action",
     isArchived: false,
     isFork: false,
     isPrivate: false,
@@ -600,8 +600,8 @@ describe("v2 collection helpers", () => {
 
     const output = buildOutput({
       profile: {
-        name: "Luke Hagar",
-        login: "LukeHagar",
+        name: "Luke Parke",
+        login: "LukasParke",
         bio: null,
         company: null,
         location: null,
@@ -641,7 +641,7 @@ describe("v2 collection helpers", () => {
     expect(output.totalContributions).toBe(output.legacy.totalContributions);
     expect(output.profileContributions.totalContributions).toBe(5);
     expect(output.repoMetrics.contributorStats.linesOfCodeChanged).toBe(10);
-    expect(output.presentation.readmeSummary.username).toBe("LukeHagar");
+    expect(output.presentation.readmeSummary.username).toBe("LukasParke");
   });
 
   test("redacts private repository details from public output while keeping aggregate counts", () => {

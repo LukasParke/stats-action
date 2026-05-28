@@ -1,7 +1,8 @@
 # GitHub Stats Action
 
-A GitHub Action that collects versioned GitHub profile statistics for profile
-sites, Remotion pipelines, and profile README summaries.
+A public-safe GitHub Action for collecting versioned GitHub profile statistics
+for profile sites, Remotion pipelines, profile README widgets, and personal
+analytics.
 
 The collector is built around three goals:
 
@@ -23,18 +24,15 @@ The collector is built around three goals:
 ## Requirements
 
 This action should run with a Personal Access Token for the profile being
-collected.
+collected. The default `GITHUB_TOKEN` is usually not enough because GraphQL
+`viewer` data and private contribution visibility depend on the token owner.
 
 Recommended token access:
 
 | Access | Purpose |
 | --- | --- |
 | `read:user` | Profile and private contribution counts |
-| `repo` | Private repositories, traffic, and contributor stats where permitted |
-
-The default `GITHUB_TOKEN` is usually not enough for profile-grade collection
-because GraphQL `viewer` data and private contribution visibility depend on the
-token owner.
+| `repo` | Private contribution counts, private repo aggregate stats, traffic, and contributor stats where permitted |
 
 ## Usage
 
@@ -46,6 +44,9 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   collect-stats:
     runs-on: ubuntu-latest
@@ -53,17 +54,36 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Collect GitHub Stats
-        uses: LukeHagar/stats-action@v1
+        uses: LukasParke/stats-action@main
+        with:
+          output-path: github-user-stats.json
+          cache-path: .github-profile-stats/cache.json
+          volatile-cache-path: .github-profile-stats/volatile-cache.json
+          backfill-mode: resume
+          max-runtime-seconds: "480"
+          graphql-concurrency: "2"
+          rest-concurrency: "4"
+          include-traffic: "true"
+          include-rest-repo-stats: "true"
+          include-private-repository-details: "false"
+          include-private-cache-details: "false"
         env:
-          GITHUB_TOKEN: ${{ secrets.USER_PAT }}
+          GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}
 
       - name: Commit stats and stable cache
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: "chore: update github stats"
           file_pattern: |
             github-user-stats.json
             .github-profile-stats/cache.json
+```
+
+Add this to the consuming repository’s `.gitignore` so volatile API metadata is
+not committed:
+
+```gitignore
+.github-profile-stats/volatile-cache.json
 ```
 
 ## Inputs
@@ -80,7 +100,7 @@ jobs:
 | `min-rest-remaining` | `750` | Stop optional REST work below this budget |
 | `include-traffic` | `true` | Collect repo traffic where permitted |
 | `include-rest-repo-stats` | `true` | Collect expensive contributor stats |
-| `include-private-repository-details` | `false` | Include private repo names, metadata, and per-repo metrics in output |
+| `include-private-repository-details` | `false` | Include private repo names, metadata, and per-repo metrics in generated output |
 | `include-private-cache-details` | `false` | Include private repo identifiers and metadata in committed stable cache |
 | `backfill-mode` | `resume` | `resume`, `refresh`, or `off` |
 
@@ -94,8 +114,8 @@ Main v2 sections:
 - `profile`: user identity and social profile data
 - `profileContributions`: canonical GitHub contribution graph totals, calendar, rollups, and completeness
 - `activity`: visible authored activity counts such as PRs, issues, discussions, and stars given
-- `repositories`: deduped repository universe with source and contribution metadata
-- `repoMetrics`: repository-derived metrics, optional contributor stats, and traffic summaries
+- `repositories`: deduped public repository universe by default
+- `repoMetrics`: public-safe repository aggregates, optional contributor stats, and traffic summaries
 - `presentation`: compact data for README cards, interactive sites, and Remotion scenes
 - `privacy`: whether private details were included and how many records were redacted
 - `collectionStatus`: cache usage, backfill status, warnings, errors, and rate-limit state
@@ -109,17 +129,17 @@ restricted contribution count, and total contribution counts can still appear,
 but private repository names, descriptions, URLs, topics, branch identifiers,
 and per-repository traffic/contributor metrics are excluded.
 
-Set `include-private-repository-details: true` only if the generated JSON is
-not public. Set `include-private-cache-details: true` only if the stable cache
-will not be committed to a public repository.
+Set `include-private-repository-details: true` only if the generated JSON is not
+public. Set `include-private-cache-details: true` only if the stable cache will
+not be committed to a public repository.
 
 ## Caching Model
 
 The action uses two caches:
 
 - Stable cache: committed at `cache-path`; stores historical contribution years,
-  repository metadata, REST contributor summaries, traffic history, and pending
-  backfill state.
+  public-safe repository metadata, REST contributor summaries, traffic history,
+  and pending backfill state.
 - Volatile cache: restored/saved through `actions/cache`; stores REST ETag and
   last-modified metadata.
 
@@ -127,7 +147,7 @@ Historical contribution years older than the previous year are treated as
 immutable when cached. Current and previous years are refreshed by default.
 Expensive REST work is queued and resumed across scheduled runs.
 
-## Development
+## Local Development
 
 ```bash
 bun install
@@ -139,6 +159,17 @@ Run locally with:
 
 ```bash
 GITHUB_TOKEN=your_pat_here bun run start
+```
+
+Useful public-safety check after generating output:
+
+```bash
+jq '{
+  schemaVersion,
+  privacy,
+  privateRepoEntries: ([.repositories[]? | select(.isPrivate == true)] | length),
+  privateTopRepos: ([.topRepos[]? | select(.isPrivate == true)] | length)
+}' github-user-stats.json
 ```
 
 ## License
