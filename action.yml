@@ -44,6 +44,14 @@ inputs:
     description: "Collect expensive REST repository contributor statistics"
     required: false
     default: "true"
+  include-private-repository-details:
+    description: "Include private repository names, metadata, and per-repo metrics in generated output"
+    required: false
+    default: "false"
+  include-private-cache-details:
+    description: "Include private repository identifiers and per-repo metadata in the committed stable cache"
+    required: false
+    default: "false"
   backfill-mode:
     description: "Backfill mode: resume, refresh, or off"
     required: false
@@ -83,6 +91,8 @@ runs:
         STATS_MIN_REST_REMAINING: ${{ inputs.min-rest-remaining }}
         STATS_INCLUDE_TRAFFIC: ${{ inputs.include-traffic }}
         STATS_INCLUDE_REST_REPO_STATS: ${{ inputs.include-rest-repo-stats }}
+        STATS_INCLUDE_PRIVATE_REPOSITORY_DETAILS: ${{ inputs.include-private-repository-details }}
+        STATS_INCLUDE_PRIVATE_CACHE_DETAILS: ${{ inputs.include-private-cache-details }}
         STATS_BACKFILL_MODE: ${{ inputs.backfill-mode }}
 
     - name: Save volatile cache

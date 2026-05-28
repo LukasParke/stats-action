@@ -70,6 +70,8 @@ export type ActionConfig = {
   minRestRemaining: number;
   includeTraffic: boolean;
   includeRestRepoStats: boolean;
+  includePrivateRepositoryDetails: boolean;
+  includePrivateCacheDetails: boolean;
   backfillMode: "resume" | "refresh" | "off";
 };
 
@@ -390,6 +392,14 @@ export type PresentationData = {
   };
 };
 
+export type PrivacyReport = {
+  privateRepositoryDetailsIncluded: boolean;
+  privateCacheDetailsIncluded: boolean;
+  redactedPrivateRepositories: number;
+  redactedRepositoryContributions: number;
+  redactedOptionalMetrics: number;
+};
+
 export type LegacyStats = {
   name: string;
   username: string;
@@ -439,6 +449,7 @@ export type GitHubStatsOutput = LegacyStats & {
   repositories: RepositoryRecord[];
   repoMetrics: RepoMetrics;
   presentation: PresentationData;
+  privacy: PrivacyReport;
   collectionStatus: CollectionStatus;
   legacy: LegacyStats;
 };

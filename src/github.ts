@@ -254,6 +254,7 @@ export async function collectRepositoryUniverse(
   octokit: Octokit,
   scheduler: RequestScheduler,
   cache: StableCache,
+  includePrivateCacheDetails: boolean,
   username: string
 ): Promise<RepositoryUniverseResult> {
   const fetchedAt = Date.now();
@@ -351,7 +352,9 @@ export async function collectRepositoryUniverse(
     ...materialized.repositories,
   ]);
 
-  for (const repository of merged) cacheRepository(cache, repository);
+  for (const repository of merged) {
+    cacheRepository(cache, repository, includePrivateCacheDetails);
+  }
 
   return {
     repositories: merged,
@@ -365,6 +368,7 @@ export async function collectContributionYears(
   scheduler: RequestScheduler,
   cache: StableCache,
   createdAt: string,
+  includePrivateCacheDetails = false,
   graphqlConcurrency = 2
 ): Promise<ContributionCollectionResult> {
   const createdYear = new Date(createdAt).getUTCFullYear();
@@ -393,7 +397,7 @@ export async function collectContributionYears(
         currentYear
       );
       fetched.push(contributionYear);
-      cacheContributionYear(cache, contributionYear);
+      cacheContributionYear(cache, contributionYear, includePrivateCacheDetails);
     } catch (error) {
       if (cached) {
         fromCache.push(cached);
@@ -418,7 +422,9 @@ export async function collectContributionYears(
   const repositories = mergeRepositories(
     orderedYears.flatMap((year) => year.repositories || [])
   );
-  for (const repository of repositories) cacheRepository(cache, repository);
+  for (const repository of repositories) {
+    cacheRepository(cache, repository, includePrivateCacheDetails);
+  }
 
   return {
     collection,
@@ -440,6 +446,8 @@ export function buildBackfillQueue(
   const next: BackfillItem[] = [];
   const forceRefresh = config.backfillMode === "refresh";
   for (const repo of repositories) {
+    if (repo.isPrivate && !config.includePrivateRepositoryDetails) continue;
+
     const basePriority = getRepositoryPriority(repo);
     const contributorStats = cache.contributorStats[repo.id];
     const contributorStatsComplete =

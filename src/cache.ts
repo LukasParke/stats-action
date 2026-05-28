@@ -5,6 +5,7 @@ import {
   BackfillItem,
   CACHE_SCHEMA_VERSION,
   CachedContributionYear,
+  CachedRepository,
   RepositoryRecord,
   StableCache,
   VolatileCache,
@@ -42,8 +43,15 @@ export function readVolatileCache(path: string): VolatileCache {
   return readJsonFile(path, createEmptyVolatileCache, isVolatileCache);
 }
 
-export function writeStableCache(path: string, cache: StableCache): void {
-  writeJsonFile(path, { ...cache, updatedAt: Date.now() });
+export function writeStableCache(
+  path: string,
+  cache: StableCache,
+  includePrivateDetails = false
+): void {
+  writeJsonFile(path, {
+    ...sanitizeStableCache(cache, includePrivateDetails),
+    updatedAt: Date.now(),
+  });
 }
 
 export function writeVolatileCache(path: string, cache: VolatileCache): void {
@@ -52,15 +60,62 @@ export function writeVolatileCache(path: string, cache: VolatileCache): void {
 
 export function cacheContributionYear(
   cache: StableCache,
-  year: CachedContributionYear
+  year: CachedContributionYear,
+  includePrivateDetails = false
 ): void {
-  cache.contributionYears[year.year] = year;
+  cache.contributionYears[year.year] = sanitizeContributionYear(
+    year,
+    includePrivateDetails
+  );
 }
 
-export function cacheRepository(cache: StableCache, repository: RepositoryRecord): void {
+export function cacheRepository(
+  cache: StableCache,
+  repository: RepositoryRecord,
+  includePrivateDetails = false
+): void {
+  if (repository.isPrivate && !includePrivateDetails) return;
+
   cache.repositories[repository.id] = {
     fetchedAt: Date.now(),
     repository: metadataOnlyRepository(repository),
+  };
+}
+
+export function sanitizeStableCache(
+  cache: StableCache,
+  includePrivateDetails: boolean
+): StableCache {
+  if (includePrivateDetails) return cache;
+
+  const repositories = Object.fromEntries(
+    Object.entries(cache.repositories).filter(
+      ([, entry]) => !entry.repository.isPrivate
+    )
+  ) as Record<string, CachedRepository>;
+  const publicRepositoryIds = new Set(Object.keys(repositories));
+
+  return {
+    ...cache,
+    repositories,
+    contributionYears: Object.fromEntries(
+      Object.entries(cache.contributionYears).map(([year, contributionYear]) => [
+        year,
+        sanitizeContributionYear(contributionYear, false, publicRepositoryIds),
+      ])
+    ),
+    contributorStats: filterRecordByPublicRepoId(
+      cache.contributorStats,
+      publicRepositoryIds
+    ),
+    traffic: filterRecordByPublicRepoId(cache.traffic, publicRepositoryIds),
+    backfill: {
+      pending: cache.backfill.pending.filter((item) =>
+        publicRepositoryIds.has(item.repoId)
+      ),
+      completed: filterBackfillRecord(cache.backfill.completed, publicRepositoryIds),
+      failures: filterBackfillRecord(cache.backfill.failures, publicRepositoryIds),
+    },
   };
 }
 
@@ -147,6 +202,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function sanitizeContributionYear(
+  year: CachedContributionYear,
+  includePrivateDetails: boolean,
+  publicRepositoryIds = new Set(
+    year.repositories.filter((repository) => !repository.isPrivate).map((repo) => repo.id)
+  )
+): CachedContributionYear {
+  if (includePrivateDetails) return year;
+
+  return {
+    ...year,
+    repositories: year.repositories
+      .filter((repository) => publicRepositoryIds.has(repository.id))
+      .map(metadataOnlyRepository),
+    repositoryContributions: year.repositoryContributions.filter((summary) =>
+      publicRepositoryIds.has(summary.repositoryId)
+    ),
+  };
+}
+
 function metadataOnlyRepository(repository: RepositoryRecord): RepositoryRecord {
   return {
     ...repository,
@@ -158,4 +233,24 @@ function metadataOnlyRepository(repository: RepositoryRecord): RepositoryRecord 
       repositoryCreations: 0,
     },
   };
+}
+
+function filterRecordByPublicRepoId<T>(
+  record: Record<string, T>,
+  publicRepositoryIds: Set<string>
+): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).filter(([repoId]) => publicRepositoryIds.has(repoId))
+  );
+}
+
+function filterBackfillRecord<T>(
+  record: Record<string, T>,
+  publicRepositoryIds: Set<string>
+): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).filter(([key]) =>
+      Array.from(publicRepositoryIds).some((repoId) => key.includes(repoId))
+    )
+  );
 }

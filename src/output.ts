@@ -1,10 +1,12 @@
 import {
+  ActionConfig,
   ActivityStats,
   CollectionStatus,
   GitHubStatsOutput,
   LegacyStats,
   OUTPUT_SCHEMA_VERSION,
   PresentationData,
+  PrivacyReport,
   ProfileContributions,
   RepoMetrics,
   RepositoryRecord,
@@ -28,51 +30,73 @@ export function buildOutput(params: {
   contributions: ContributionCollectionResult;
   repositories: RepositoryRecord[];
   cache: StableCache;
+  config: ActionConfig;
   collectionStatus: CollectionStatus;
   fetchedAt: number;
 }): GitHubStatsOutput {
+  const includePrivateDetails = params.config.includePrivateRepositoryDetails;
+  const visibleRepositories = includePrivateDetails
+    ? params.repositories
+    : params.repositories.filter((repo) => !repo.isPrivate);
+  const visibleRepositoryIds = new Set(visibleRepositories.map((repo) => repo.id));
+  const visibleRepositoryContributions = includePrivateDetails
+    ? params.contributions.repositoryContributions
+    : params.contributions.repositoryContributions.filter((summary) =>
+        visibleRepositoryIds.has(summary.repositoryId)
+      );
   const contributionStats = calculateContributionStats(params.contributions.collection);
-  const { languages: topLanguages, codeByteTotal } = aggregateRepositoryLanguages(
-    params.repositories
+  const { languages: topLanguages, codeByteTotal } =
+    aggregateRepositoryLanguages(visibleRepositories);
+  const allComputedRepos = params.repositories.map(toComputedRepo);
+  const visibleComputedRepos = visibleRepositories.map(toComputedRepo);
+  const repoStats = calculateRepoStats(allComputedRepos);
+  const computedStats = {
+    ...calculateComputedStats(visibleComputedRepos, topLanguages, contributionStats),
+    ...repoStats,
+  };
+  const visibleContributorStats = Object.entries(params.cache.contributorStats)
+    .filter(([repoId]) => visibleRepositoryIds.has(repoId))
+    .map(([, stats]) => stats);
+  const visibleTrafficSummaries = Object.entries(params.cache.traffic)
+    .filter(([repoId]) => visibleRepositoryIds.has(repoId))
+    .map(([, traffic]) => traffic);
+  const ownedVisibleRepos = visibleRepositories.filter((repo) =>
+    repo.sources.includes("owned")
   );
-  const computedRepos = params.repositories.map((repo) => ({
-    ...repo,
-    languages: {
-      edges: repo.languages.map((language) => ({
-        size: language.value,
-        node: {
-          name: language.languageName,
-          color: language.color,
-        },
-      })),
-    },
-  }));
-  const computedStats = calculateComputedStats(
-    computedRepos,
-    topLanguages,
-    contributionStats
-  );
-  const repoStats = calculateRepoStats(computedRepos);
-  const ownedRepos = params.repositories.filter((repo) => repo.sources.includes("owned"));
-  const starCount = ownedRepos.reduce((sum, repo) => sum + repo.stars, 0);
-  const forkCount = ownedRepos.reduce((sum, repo) => sum + repo.forks, 0);
-  const contributorSummaries = Object.values(params.cache.contributorStats);
-  const trafficSummaries = Object.values(params.cache.traffic);
-  const linesAdded = contributorSummaries.reduce(
+
+  const linesAdded = visibleContributorStats.reduce(
     (sum, stats) => sum + stats.additions,
     0
   );
-  const linesDeleted = contributorSummaries.reduce(
+  const linesDeleted = visibleContributorStats.reduce(
     (sum, stats) => sum + stats.deletions,
     0
   );
-  const commitCount = contributorSummaries.reduce((sum, stats) => sum + stats.commits, 0);
-  const repoViews = trafficSummaries.reduce((sum, traffic) => sum + traffic.count, 0);
-  const repoViewUniques = trafficSummaries.reduce(
+  const commitCount = visibleContributorStats.reduce(
+    (sum, stats) => sum + stats.commits,
+    0
+  );
+  const repoViews = visibleTrafficSummaries.reduce(
+    (sum, traffic) => sum + traffic.count,
+    0
+  );
+  const repoViewUniques = visibleTrafficSummaries.reduce(
     (sum, traffic) => sum + traffic.uniques,
     0
   );
-  const topRepos = toTopRepos(params.repositories);
+  const starCount = ownedVisibleRepos.reduce((sum, repo) => sum + repo.stars, 0);
+  const forkCount = ownedVisibleRepos.reduce((sum, repo) => sum + repo.forks, 0);
+  const topRepos = toTopRepos(visibleRepositories);
+  const privacy = buildPrivacyReport({
+    includePrivateRepositoryDetails: includePrivateDetails,
+    includePrivateCacheDetails: params.config.includePrivateCacheDetails,
+    repositories: params.repositories,
+    repositoryContributions: params.contributions.repositoryContributions.length,
+    visibleRepositoryContributions: visibleRepositoryContributions.length,
+    visibleRepositoryIds,
+    cache: params.cache,
+  });
+  const collectionStatus = addPrivacyWarnings(params.collectionStatus, privacy);
 
   const repoMetrics: RepoMetrics = {
     starCount,
@@ -85,26 +109,31 @@ export function buildOutput(params: {
       linesAdded,
       linesDeleted,
       linesOfCodeChanged: linesAdded + linesDeleted,
-      reposCompleted: contributorSummaries.filter((stats) =>
+      reposCompleted: visibleContributorStats.filter((stats) =>
         ["fresh", "cached"].includes(stats.status)
       ).length,
       reposPending: params.cache.backfill.pending.filter(
-        (item) => item.type === "contributors"
+        (item) => item.type === "contributors" && visibleRepositoryIds.has(item.repoId)
       ).length,
-      reposFailed: Object.values(params.cache.backfill.failures).filter((failure) =>
-        failure.key.startsWith("contributors:")
+      reposFailed: Object.values(params.cache.backfill.failures).filter(
+        (failure) =>
+          failure.key.startsWith("contributors:") &&
+          hasVisibleRepositoryId(failure.key, visibleRepositoryIds)
       ).length,
     },
     traffic: {
       repoViews,
       repoViewUniques,
-      reposCompleted: trafficSummaries.filter((traffic) =>
+      reposCompleted: visibleTrafficSummaries.filter((traffic) =>
         ["fresh", "cached"].includes(traffic.status)
       ).length,
-      reposPending: params.cache.backfill.pending.filter((item) => item.type === "traffic")
-        .length,
-      reposFailed: Object.values(params.cache.backfill.failures).filter((failure) =>
-        failure.key.startsWith("traffic:")
+      reposPending: params.cache.backfill.pending.filter(
+        (item) => item.type === "traffic" && visibleRepositoryIds.has(item.repoId)
+      ).length,
+      reposFailed: Object.values(params.cache.backfill.failures).filter(
+        (failure) =>
+          failure.key.startsWith("traffic:") &&
+          hasVisibleRepositoryId(failure.key, visibleRepositoryIds)
       ).length,
     },
     repoStats,
@@ -126,7 +155,7 @@ export function buildOutput(params: {
       params.contributions.collection.totalPullRequestReviewContributions,
     contributionCalendar: params.contributions.collection.contributionCalendar,
     stats: contributionStats,
-    repositoryContributions: params.contributions.repositoryContributions,
+    repositoryContributions: visibleRepositoryContributions,
     completeness: {
       complete: params.contributions.missingYears.length === 0,
       yearsFetched: params.contributions.yearsFetched,
@@ -181,7 +210,7 @@ export function buildOutput(params: {
     profile: params.profile,
     legacy,
     repoMetrics,
-    complete: params.collectionStatus.complete,
+    complete: collectionStatus.complete,
   });
 
   return {
@@ -191,12 +220,84 @@ export function buildOutput(params: {
     profile: params.profile,
     profileContributions,
     activity: params.activity,
-    repositories: params.repositories,
+    repositories: visibleRepositories,
     repoMetrics,
     presentation,
-    collectionStatus: params.collectionStatus,
+    privacy,
+    collectionStatus,
     legacy,
   };
+}
+
+function toComputedRepo(repo: RepositoryRecord) {
+  return {
+    ...repo,
+    languages: {
+      edges: repo.languages.map((language) => ({
+        size: language.value,
+        node: {
+          name: language.languageName,
+          color: language.color,
+        },
+      })),
+    },
+  };
+}
+
+function buildPrivacyReport(params: {
+  includePrivateRepositoryDetails: boolean;
+  includePrivateCacheDetails: boolean;
+  repositories: RepositoryRecord[];
+  repositoryContributions: number;
+  visibleRepositoryContributions: number;
+  visibleRepositoryIds: Set<string>;
+  cache: StableCache;
+}): PrivacyReport {
+  return {
+    privateRepositoryDetailsIncluded: params.includePrivateRepositoryDetails,
+    privateCacheDetailsIncluded: params.includePrivateCacheDetails,
+    redactedPrivateRepositories: params.includePrivateRepositoryDetails
+      ? 0
+      : params.repositories.filter((repo) => repo.isPrivate).length,
+    redactedRepositoryContributions:
+      params.repositoryContributions - params.visibleRepositoryContributions,
+    redactedOptionalMetrics:
+      Object.keys(params.cache.contributorStats).filter(
+        (repoId) => !params.visibleRepositoryIds.has(repoId)
+      ).length +
+      Object.keys(params.cache.traffic).filter(
+        (repoId) => !params.visibleRepositoryIds.has(repoId)
+      ).length,
+  };
+}
+
+function addPrivacyWarnings(
+  collectionStatus: CollectionStatus,
+  privacy: PrivacyReport
+): CollectionStatus {
+  const privacyWarnings: string[] = [];
+  if (privacy.redactedPrivateRepositories > 0) {
+    privacyWarnings.push(
+      `Private repository details redacted: ${privacy.redactedPrivateRepositories} repositories`
+    );
+  }
+  if (privacy.redactedRepositoryContributions > 0) {
+    privacyWarnings.push(
+      `Private repository contribution details redacted: ${privacy.redactedRepositoryContributions} repositories`
+    );
+  }
+
+  return {
+    ...collectionStatus,
+    warnings: [...collectionStatus.warnings, ...privacyWarnings],
+  };
+}
+
+function hasVisibleRepositoryId(key: string, visibleRepositoryIds: Set<string>): boolean {
+  for (const repoId of visibleRepositoryIds) {
+    if (key.includes(repoId)) return true;
+  }
+  return false;
 }
 
 function buildPresentation(params: {

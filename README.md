@@ -18,6 +18,7 @@ The collector is built around three goals:
 - Languages, topics, stars, forks, active repository counts, and top repositories
 - Optional REST backfill for repository contributor statistics and traffic data
 - Collection status, cache usage, incomplete years, pending backfill, and rate-limit metadata
+- Public-safe privacy defaults that keep private repository names and metadata out of committed output/cache
 
 ## Requirements
 
@@ -79,6 +80,8 @@ jobs:
 | `min-rest-remaining` | `750` | Stop optional REST work below this budget |
 | `include-traffic` | `true` | Collect repo traffic where permitted |
 | `include-rest-repo-stats` | `true` | Collect expensive contributor stats |
+| `include-private-repository-details` | `false` | Include private repo names, metadata, and per-repo metrics in output |
+| `include-private-cache-details` | `false` | Include private repo identifiers and metadata in committed stable cache |
 | `backfill-mode` | `resume` | `resume`, `refresh`, or `off` |
 
 ## Output Shape
@@ -94,8 +97,21 @@ Main v2 sections:
 - `repositories`: deduped repository universe with source and contribution metadata
 - `repoMetrics`: repository-derived metrics, optional contributor stats, and traffic summaries
 - `presentation`: compact data for README cards, interactive sites, and Remotion scenes
+- `privacy`: whether private details were included and how many records were redacted
 - `collectionStatus`: cache usage, backfill status, warnings, errors, and rate-limit state
 - `legacy`: mirrored v1-style fields
+
+## Privacy Defaults
+
+By default, private repository details are redacted from committed output and
+stable cache files. Aggregate values such as private repository count,
+restricted contribution count, and total contribution counts can still appear,
+but private repository names, descriptions, URLs, topics, branch identifiers,
+and per-repository traffic/contributor metrics are excluded.
+
+Set `include-private-repository-details: true` only if the generated JSON is
+not public. Set `include-private-cache-details: true` only if the stable cache
+will not be committed to a public repository.
 
 ## Caching Model
 

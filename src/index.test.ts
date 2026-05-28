@@ -361,6 +361,8 @@ describe("v2 collection helpers", () => {
     minRestRemaining: 750,
     includeTraffic: true,
     includeRestRepoStats: true,
+    includePrivateRepositoryDetails: false,
+    includePrivateCacheDetails: false,
     backfillMode: "resume",
   };
 
@@ -529,6 +531,20 @@ describe("v2 collection helpers", () => {
     });
   });
 
+  test("does not store private repository details in stable cache by default", () => {
+    const cache = createEmptyStableCache();
+    const privateRepo = createRepository({
+      id: "R_PRIVATE",
+      name: "private-product",
+      nameWithOwner: "LukasParke/private-product",
+      isPrivate: true,
+    });
+
+    cacheRepository(cache, privateRepo);
+
+    expect(cache.repositories[privateRepo.id]).toBeUndefined();
+  });
+
   test("builds v2 output while preserving legacy top-level aliases", () => {
     const cache = createEmptyStableCache();
     const repo = createRepository();
@@ -616,6 +632,7 @@ describe("v2 collection helpers", () => {
       },
       repositories: [repo],
       cache,
+      config: baseConfig,
       collectionStatus: status,
       fetchedAt: 1000,
     });
@@ -625,5 +642,110 @@ describe("v2 collection helpers", () => {
     expect(output.profileContributions.totalContributions).toBe(5);
     expect(output.repoMetrics.contributorStats.linesOfCodeChanged).toBe(10);
     expect(output.presentation.readmeSummary.username).toBe("LukeHagar");
+  });
+
+  test("redacts private repository details from public output while keeping aggregate counts", () => {
+    const cache = createEmptyStableCache();
+    const publicRepo = createRepository();
+    const privateRepo = createRepository({
+      id: "R_PRIVATE",
+      name: "private-product",
+      nameWithOwner: "LukasParke/private-product",
+      isPrivate: true,
+      stars: 999,
+      topics: ["secret-topic"],
+      languages: [
+        {
+          languageName: "SecretLang",
+          color: "#000000",
+          value: 5000,
+          percentage: 100,
+        },
+      ],
+      codeByteTotal: 5000,
+    });
+    const collection = emptyContributionsCollection();
+    const status: CollectionStatus = {
+      startedAt: 1,
+      finishedAt: 2,
+      durationMs: 1,
+      complete: true,
+      coreComplete: true,
+      cache: {
+        stablePath: "cache.json",
+        volatilePath: "volatile.json",
+        contributionYearsFromCache: 0,
+        contributionYearsFetched: 1,
+        repositoriesFromCache: 0,
+        repositoriesFetched: 1,
+      },
+      backfill: {
+        enabled: true,
+        completedThisRun: 0,
+        pending: 0,
+        failedThisRun: 0,
+        skippedThisRun: 0,
+      },
+      rateLimit: { graphql: null, rest: null },
+      warnings: [],
+      errors: [],
+    };
+
+    const output = buildOutput({
+      profile: {
+        name: "Luke Parke",
+        login: "LukasParke",
+        bio: null,
+        company: null,
+        location: null,
+        email: null,
+        twitterUsername: null,
+        websiteUrl: null,
+        avatarUrl: "https://example.com/avatar.png",
+        createdAt: "2020-01-01T00:00:00Z",
+        followers: 1,
+        following: 2,
+      },
+      activity: {
+        totalPullRequests: 0,
+        openIssues: 0,
+        closedIssues: 0,
+        repositoriesContributedTo: 2,
+        discussionsStarted: 0,
+        discussionsAnswered: 0,
+        starsGiven: 0,
+      },
+      contributions: {
+        collection,
+        repositoryContributions: [
+          {
+            repositoryId: privateRepo.id,
+            nameWithOwner: privateRepo.nameWithOwner,
+            owner: privateRepo.owner,
+            counts: privateRepo.contributionCounts,
+          },
+        ],
+        repositories: [publicRepo, privateRepo],
+        yearsFetched: ["2026"],
+        yearsFromCache: [],
+        missingYears: [],
+      },
+      repositories: [publicRepo, privateRepo],
+      cache,
+      config: baseConfig,
+      collectionStatus: status,
+      fetchedAt: 1000,
+    });
+
+    expect(output.repoStats.privateRepos).toBe(1);
+    expect(output.repositories.map((repo) => repo.nameWithOwner)).not.toContain(
+      privateRepo.nameWithOwner
+    );
+    expect(output.profileContributions.repositoryContributions).toHaveLength(0);
+    expect(output.topLanguages.map((lang) => lang.languageName)).not.toContain(
+      "SecretLang"
+    );
+    expect(output.privacy.redactedPrivateRepositories).toBe(1);
+    expect(output.collectionStatus.warnings[0]).toContain("Private repository details redacted");
   });
 });

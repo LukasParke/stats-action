@@ -58,6 +58,11 @@ export function readActionConfig(): ActionConfig {
     minRestRemaining: inputNumber("min-rest-remaining", 750),
     includeTraffic: inputBoolean("include-traffic", true),
     includeRestRepoStats: inputBoolean("include-rest-repo-stats", true),
+    includePrivateRepositoryDetails: inputBoolean(
+      "include-private-repository-details",
+      false
+    ),
+    includePrivateCacheDetails: inputBoolean("include-private-cache-details", false),
     backfillMode: inputBackfillMode("backfill-mode", "resume"),
   };
 }
@@ -102,6 +107,7 @@ export async function runStatsCollection(
     scheduler,
     stableCache,
     profile.createdAt,
+    config.includePrivateCacheDetails,
     config.graphqlConcurrency
   );
   if (
@@ -123,6 +129,7 @@ export async function runStatsCollection(
     octokit,
     scheduler,
     stableCache,
+    config.includePrivateCacheDetails,
     profile.login
   );
   let repositories = mergeRepositories([
@@ -130,7 +137,9 @@ export async function runStatsCollection(
     ...contributions.repositories,
   ]);
 
-  for (const repository of repositories) cacheRepository(stableCache, repository);
+  for (const repository of repositories) {
+    cacheRepository(stableCache, repository, config.includePrivateCacheDetails);
+  }
 
   console.log("Building resumable optional repository metric queue");
   stableCache.backfill.pending = buildBackfillQueue(
@@ -196,12 +205,13 @@ export async function runStatsCollection(
     contributions,
     repositories,
     cache: stableCache,
+    config,
     collectionStatus,
     fetchedAt: finishedAt,
   });
 
   writeJsonOutput(config.outputPath, output);
-  writeStableCache(config.cachePath, stableCache);
+  writeStableCache(config.cachePath, stableCache, config.includePrivateCacheDetails);
   writeVolatileCache(config.volatileCachePath, volatileCache);
 
   await writeSummary(output);
