@@ -32,25 +32,22 @@ jobs:
   release:
     runs-on: ubuntu-latest
     needs: test
+    if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release):') }}
     concurrency:
       group: release-action
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
-
-      - name: Get package info
-        id: package-info
-        uses: luizfelipelaviola/get-package-info@v1
         with:
-          path: .
+          fetch-depth: 0
 
-      - name: Publish Draft Release if needed
+      - name: Version and publish release
         run: |
           set -euo pipefail
 
-          version="${{ steps.package-info.outputs.version }}"
-          if [[ ! "${version}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Package version must be a patch SemVer value, got: ${version}" >&2
+          current_version="$(node -p "require('./package.json').version")"
+          if [[ ! "${current_version}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Package version must be a patch SemVer value, got: ${current_version}" >&2
             exit 1
           fi
 
@@ -58,21 +55,26 @@ jobs:
           minor="${BASH_REMATCH[2]}"
           patch="${BASH_REMATCH[3]}"
           releases="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq '.[] | [.tag_name, (if .draft then "draft" else "published" end)] | @tsv')"
-          candidate="${version}"
+          candidate="${current_version}"
+          release_tag=""
+          publish_existing_draft="false"
 
           while true; do
-            status="$(
+            release_line="$(
               printf '%s\n' "${releases}" \
-                | awk -F '\t' -v version="${candidate}" '$1 == version || $1 == "v" version { print $2; exit }'
+                | awk -F '\t' -v version="${candidate}" '$1 == version || $1 == "v" version { print $1 "\t" $2; exit }'
             )"
+            release_tag="$(printf '%s' "${release_line}" | awk -F '\t' '{ print $1 }')"
+            status="$(printf '%s' "${release_line}" | awk -F '\t' '{ print $2 }')"
 
             if [ "${status}" = "draft" ]; then
-              echo "Draft release already exists for ${candidate}"
-              exit 0
+              echo "Draft release already exists for ${candidate}; it will be published"
+              publish_existing_draft="true"
+              break
             fi
 
-            if [ "${status}" = "published" ]; then
-              echo "Release ${candidate} is already published; checking next patch version"
+            if [ "${status}" = "published" ] || git rev-parse -q --verify "refs/tags/${candidate}" >/dev/null || git rev-parse -q --verify "refs/tags/v${candidate}" >/dev/null; then
+              echo "Version ${candidate} already exists; checking next patch version"
               patch=$((patch + 1))
               candidate="${major}.${minor}.${patch}"
               continue
@@ -81,10 +83,20 @@ jobs:
             break
           done
 
-          if [ "${candidate}" != "${version}" ]; then
-            echo "Creating draft release ${candidate} because ${version} has already been published"
+          if [ "${candidate}" != "${current_version}" ]; then
+            node -e "const fs = require('fs'); const pkg = require('./package.json'); pkg.version = '${candidate}'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add package.json
+            git commit -m "chore(release): ${candidate}"
+            git push origin HEAD:${GITHUB_REF_NAME}
           fi
 
-          gh release create --draft "${candidate}" --title "${candidate}" --generate-notes
+          target="$(git rev-parse HEAD)"
+          if [ "${publish_existing_draft}" = "true" ]; then
+            gh release edit "${release_tag}" --draft=false --title "${candidate}" --target "${target}"
+          else
+            gh release create "${candidate}" --title "${candidate}" --target "${target}" --generate-notes
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
