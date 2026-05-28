@@ -1,53 +1,49 @@
 # GitHub Stats Action
 
-A GitHub Action that collects comprehensive statistics for a user's GitHub profile and outputs them to a JSON file. Perfect for building profile READMEs, dashboards, or personal analytics.
+A GitHub Action that collects versioned GitHub profile statistics for profile
+sites, Remotion pipelines, and profile README summaries.
 
-## Features
+The collector is built around three goals:
 
-- **Profile Data**: Name, bio, company, location, social links
-- **Contribution Stats**: Total contributions, streaks, most active day, monthly breakdown
-- **Repository Metrics**: Stars, forks, views, top repositories
-- **Code Statistics**: Lines added/deleted, commit counts, languages with percentages
-- **Social Stats**: Followers, following, stars given
-- **Activity Data**: Pull requests, issues, PR reviews, discussions
+- gather profile contribution data across owned, org, collaborator, and external repositories
+- avoid repeatedly fetching stable historical data
+- stay within GitHub API limits through bounded concurrency, caching, and resumable backfill
+
+## What It Collects
+
+- Profile identity, social fields, followers, following, and stars given
+- GitHub contribution graph totals and daily calendar data
+- Monthly and yearly contribution rollups, streaks, peak days, and README-ready summaries
+- Owned, affiliated, and contributed repository metadata, deduped by repository ID
+- Languages, topics, stars, forks, active repository counts, and top repositories
+- Optional REST backfill for repository contributor statistics and traffic data
+- Collection status, cache usage, incomplete years, pending backfill, and rate-limit metadata
 
 ## Requirements
 
-### Personal Access Token (PAT)
+This action should run with a Personal Access Token for the profile being
+collected.
 
-This action **requires a Personal Access Token** - the default `GITHUB_TOKEN` will not work because:
+Recommended token access:
 
-- Contribution calendar data requires authentication as the actual user
-- Repository view counts require push access across all repositories
-- The `viewer` GraphQL query returns data for the token owner
+| Access | Purpose |
+| --- | --- |
+| `read:user` | Profile and private contribution counts |
+| `repo` | Private repositories, traffic, and contributor stats where permitted |
 
-#### Required PAT Scopes
-
-| Scope | Purpose |
-|-------|---------|
-| `read:user` | Access user profile data |
-| `repo` | Access repository statistics, views, and private repos |
-
-#### Creating a PAT
-
-1. Go to [GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens](https://github.com/settings/tokens?type=beta)
-2. Click "Generate new token"
-3. Select the scopes listed above
-4. Copy the token and add it as a repository secret (e.g., `USER_PAT`)
+The default `GITHUB_TOKEN` is usually not enough for profile-grade collection
+because GraphQL `viewer` data and private contribution visibility depend on the
+token owner.
 
 ## Usage
-
-### Basic Workflow
-
-Create `.github/workflows/stats.yaml`:
 
 ```yaml
 name: Collect GitHub Stats
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Run daily at midnight
-  workflow_dispatch:      # Allow manual trigger
+    - cron: "0 0 * * *"
+  workflow_dispatch:
 
 jobs:
   collect-stats:
@@ -60,165 +56,73 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.USER_PAT }}
 
-      - name: Commit stats
+      - name: Commit stats and stable cache
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: update github stats"
-          file_pattern: github-user-stats.json
+          file_pattern: |
+            github-user-stats.json
+            .github-profile-stats/cache.json
 ```
 
-### Template Repository
+## Inputs
 
-For a complete setup with visualization, use the [stats template repository](https://github.com/LukeHagar/stats/).
+| Input | Default | Description |
+| --- | --- | --- |
+| `output-path` | `github-user-stats.json` | Generated v2 stats JSON |
+| `cache-path` | `.github-profile-stats/cache.json` | Stable cache intended to be committed |
+| `volatile-cache-path` | `.github-profile-stats/volatile-cache.json` | Actions-cache-backed REST metadata |
+| `max-runtime-seconds` | `480` | Soft budget for optional backfill |
+| `graphql-concurrency` | `2` | GraphQL collection concurrency |
+| `rest-concurrency` | `4` | REST backfill concurrency |
+| `min-graphql-remaining` | `500` | Stop optional GraphQL work below this budget |
+| `min-rest-remaining` | `750` | Stop optional REST work below this budget |
+| `include-traffic` | `true` | Collect repo traffic where permitted |
+| `include-rest-repo-stats` | `true` | Collect expensive contributor stats |
+| `backfill-mode` | `resume` | `resume`, `refresh`, or `off` |
 
-## Output
+## Output Shape
 
-The action creates a `github-user-stats.json` file with the following structure:
+The output uses `schemaVersion: 2` and keeps legacy top-level aliases for older
+README consumers.
 
-### Profile Information
+Main v2 sections:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Display name |
-| `username` | string | GitHub username |
-| `avatarUrl` | string | Profile picture URL |
-| `bio` | string \| null | Profile bio |
-| `company` | string \| null | Company name |
-| `location` | string \| null | Location |
-| `email` | string \| null | Public email |
-| `twitterUsername` | string \| null | Twitter/X handle |
-| `websiteUrl` | string \| null | Website URL |
-| `createdAt` | string | Account creation date (ISO 8601) |
+- `profile`: user identity and social profile data
+- `profileContributions`: canonical GitHub contribution graph totals, calendar, rollups, and completeness
+- `activity`: visible authored activity counts such as PRs, issues, discussions, and stars given
+- `repositories`: deduped repository universe with source and contribution metadata
+- `repoMetrics`: repository-derived metrics, optional contributor stats, and traffic summaries
+- `presentation`: compact data for README cards, interactive sites, and Remotion scenes
+- `collectionStatus`: cache usage, backfill status, warnings, errors, and rate-limit state
+- `legacy`: mirrored v1-style fields
 
-### Statistics
+## Caching Model
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `totalCommits` | number | Total commits (from GitHub search) |
-| `commitCount` | number | Commits from contributor stats |
-| `totalPullRequests` | number | Total PRs created |
-| `totalPullRequestReviews` | number | Total PR reviews |
-| `totalContributions` | number | All-time contributions |
-| `openIssues` | number | Open issues created |
-| `closedIssues` | number | Closed issues created |
-| `discussionsStarted` | number | Discussions started |
-| `discussionsAnswered` | number | Discussion answers marked as correct |
-| `repositoriesContributedTo` | number | Repos contributed to |
+The action uses two caches:
 
-### Repository Metrics
+- Stable cache: committed at `cache-path`; stores historical contribution years,
+  repository metadata, REST contributor summaries, traffic history, and pending
+  backfill state.
+- Volatile cache: restored/saved through `actions/cache`; stores REST ETag and
+  last-modified metadata.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `starCount` | number | Total stars received |
-| `forkCount` | number | Total forks of your repos |
-| `starsGiven` | number | Repos you've starred |
-| `repoViews` | number | Total repo views (last 14 days) |
-
-### Code Statistics
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `linesAdded` | number | Total lines added |
-| `linesDeleted` | number | Total lines deleted |
-| `linesOfCodeChanged` | number | Total lines changed (added + deleted) |
-| `codeByteTotal` | number | Total bytes of code |
-
-### Social
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `followers` | number | Follower count |
-| `following` | number | Following count |
-
-### Languages
-
-```json
-{
-  "topLanguages": [
-    {
-      "languageName": "TypeScript",
-      "color": "#3178c6",
-      "value": 1234567,
-      "percentage": 45.5
-    }
-  ]
-}
-```
-
-### Contribution Stats
-
-```json
-{
-  "contributionStats": {
-    "longestStreak": 42,
-    "currentStreak": 7,
-    "mostActiveDay": "Tuesday",
-    "averagePerDay": 3.5,
-    "averagePerWeek": 24.5,
-    "averagePerMonth": 105.0,
-    "monthlyBreakdown": [
-      { "month": "2024-01", "contributions": 120 }
-    ]
-  }
-}
-```
-
-### Top Repositories
-
-```json
-{
-  "topRepos": [
-    {
-      "name": "repo-name",
-      "description": "Repo description",
-      "stars": 100,
-      "forks": 25,
-      "isArchived": false,
-      "primaryLanguage": "TypeScript",
-      "updatedAt": "2024-01-15T10:30:00Z",
-      "createdAt": "2023-06-01T08:00:00Z"
-    }
-  ]
-}
-```
-
-### Full Contribution Calendar
-
-The `contributionsCollection` field contains the complete contribution calendar with daily data for building heatmaps.
+Historical contribution years older than the previous year are treated as
+immutable when cached. Current and previous years are refreshed by default.
+Expensive REST work is queued and resumed across scheduled runs.
 
 ## Development
 
-### Prerequisites
-
-- [Bun](https://bun.sh) v1.0+
-
-### Setup
-
 ```bash
-# Install dependencies
 bun install
-
-# Run locally (requires GITHUB_TOKEN env var)
-export GITHUB_TOKEN=your_pat_here
-bun run start
-
-# Run tests
 bun test
-
-# Type check
 bun run typecheck
 ```
 
-### Project Structure
+Run locally with:
 
-```
-├── src/
-│   ├── index.ts       # Main action logic
-│   ├── index.test.ts  # Tests
-│   └── Types.ts       # TypeScript type definitions
-├── action.yml         # GitHub Action definition
-├── package.json
-└── tsconfig.json
+```bash
+GITHUB_TOKEN=your_pat_here bun run start
 ```
 
 ## License

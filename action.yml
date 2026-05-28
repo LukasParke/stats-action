@@ -3,13 +3,66 @@ description: "retrieve github profile stats and save locally to repo for further
 branding:
   icon: "bar-chart-2"
   color: "blue"
+inputs:
+  output-path:
+    description: "Path for the generated stats JSON"
+    required: false
+    default: "github-user-stats.json"
+  cache-path:
+    description: "Path for committed stable cache state"
+    required: false
+    default: ".github-profile-stats/cache.json"
+  volatile-cache-path:
+    description: "Path for Actions-cache-backed volatile API metadata"
+    required: false
+    default: ".github-profile-stats/volatile-cache.json"
+  max-runtime-seconds:
+    description: "Soft runtime budget for optional backfill work"
+    required: false
+    default: "480"
+  graphql-concurrency:
+    description: "Maximum concurrent GraphQL collection work"
+    required: false
+    default: "2"
+  rest-concurrency:
+    description: "Maximum concurrent REST backfill work"
+    required: false
+    default: "4"
+  min-graphql-remaining:
+    description: "Stop optional GraphQL work below this remaining API budget"
+    required: false
+    default: "500"
+  min-rest-remaining:
+    description: "Stop optional REST work below this remaining API budget"
+    required: false
+    default: "750"
+  include-traffic:
+    description: "Collect repository traffic for repos where the token has access"
+    required: false
+    default: "true"
+  include-rest-repo-stats:
+    description: "Collect expensive REST repository contributor statistics"
+    required: false
+    default: "true"
+  backfill-mode:
+    description: "Backfill mode: resume, refresh, or off"
+    required: false
+    default: "resume"
 runs:
   using: "composite"
   steps:
+    - name: Restore volatile cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ inputs.volatile-cache-path }}
+        key: github-profile-stats-${{ runner.os }}-${{ github.repository }}-${{ github.actor }}-${{ github.run_id }}
+        restore-keys: |
+          github-profile-stats-${{ runner.os }}-${{ github.repository }}-${{ github.actor }}-
+
     - name: Setup Bun
       uses: oven-sh/setup-bun@v2
       with:
-        bun-version: latest
+        bun-version: "1.3.13"
 
     - name: Install dependencies
       shell: bash
@@ -19,3 +72,22 @@ runs:
     - name: Run stats collection
       shell: bash
       run: bun run ${{ github.action_path }}/src/index.ts
+      env:
+        STATS_OUTPUT_PATH: ${{ inputs.output-path }}
+        STATS_CACHE_PATH: ${{ inputs.cache-path }}
+        STATS_VOLATILE_CACHE_PATH: ${{ inputs.volatile-cache-path }}
+        STATS_MAX_RUNTIME_SECONDS: ${{ inputs.max-runtime-seconds }}
+        STATS_GRAPHQL_CONCURRENCY: ${{ inputs.graphql-concurrency }}
+        STATS_REST_CONCURRENCY: ${{ inputs.rest-concurrency }}
+        STATS_MIN_GRAPHQL_REMAINING: ${{ inputs.min-graphql-remaining }}
+        STATS_MIN_REST_REMAINING: ${{ inputs.min-rest-remaining }}
+        STATS_INCLUDE_TRAFFIC: ${{ inputs.include-traffic }}
+        STATS_INCLUDE_REST_REPO_STATS: ${{ inputs.include-rest-repo-stats }}
+        STATS_BACKFILL_MODE: ${{ inputs.backfill-mode }}
+
+    - name: Save volatile cache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.volatile-cache-path }}
+        key: github-profile-stats-${{ runner.os }}-${{ github.repository }}-${{ github.actor }}-${{ github.run_id }}

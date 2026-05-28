@@ -1,3 +1,6 @@
+export const OUTPUT_SCHEMA_VERSION = 2;
+export const CACHE_SCHEMA_VERSION = 1;
+
 export type Language = {
   languageName: string;
   color: string | null;
@@ -10,6 +13,10 @@ export type ContributionData = {
   date: string;
 };
 
+export type ContributionWeek = {
+  contributionDays: ContributionData[];
+};
+
 export type ContributionsCollection = {
   totalCommitContributions: number;
   restrictedContributionsCount: number;
@@ -19,28 +26,30 @@ export type ContributionsCollection = {
   totalPullRequestReviewContributions: number;
   contributionCalendar: {
     totalContributions: number;
-    weeks: {
-      contributionDays: {
-        contributionCount: number;
-        date: string;
-      }[];
-    }[];
+    weeks: ContributionWeek[];
   };
 };
 
 export type MonthlyContribution = {
-  month: string; // YYYY-MM format
+  month: string;
+  contributions: number;
+};
+
+export type YearlyContribution = {
+  year: string;
   contributions: number;
 };
 
 export type ContributionStats = {
   longestStreak: number;
   currentStreak: number;
-  mostActiveDay: string; // Day of week
+  mostActiveDay: string;
   averagePerDay: number;
   averagePerWeek: number;
   averagePerMonth: number;
   monthlyBreakdown: MonthlyContribution[];
+  yearlyBreakdown: YearlyContribution[];
+  peakDay: { date: string; contributions: number } | null;
 };
 
 export type RateLimitInfo = {
@@ -50,23 +59,66 @@ export type RateLimitInfo = {
   resetAt: string;
 };
 
-export type UserProfile = {
+export type ActionConfig = {
+  outputPath: string;
+  cachePath: string;
+  volatileCachePath: string;
+  maxRuntimeSeconds: number;
+  graphqlConcurrency: number;
+  restConcurrency: number;
+  minGraphqlRemaining: number;
+  minRestRemaining: number;
+  includeTraffic: boolean;
+  includeRestRepoStats: boolean;
+  backfillMode: "resume" | "refresh" | "off";
+};
+
+export type CollectionSource =
+  | "owned"
+  | "affiliated"
+  | "contributed"
+  | "profile-contribution"
+  | "cache";
+
+export type RepositoryContributionCounts = {
+  commits: number;
+  issues: number;
+  pullRequests: number;
+  pullRequestReviews: number;
+  repositoryCreations: number;
+};
+
+export type RepositoryRecord = {
+  id: string;
   name: string;
-  login: string;
-  bio: string | null;
-  company: string | null;
-  location: string | null;
-  email: string | null;
-  twitterUsername: string | null;
-  websiteUrl: string | null;
-  avatarUrl: string;
+  nameWithOwner: string;
+  owner: string;
+  ownerType: string | null;
+  description: string | null;
+  url: string | null;
+  isArchived: boolean;
+  isFork: boolean;
+  isPrivate: boolean;
+  visibility: string | null;
+  viewerPermission: string | null;
   createdAt: string;
-  followers: number;
-  following: number;
+  updatedAt: string;
+  pushedAt: string | null;
+  defaultBranchOid: string | null;
+  stars: number;
+  forks: number;
+  primaryLanguage: string | null;
+  topics: string[];
+  languages: Language[];
+  codeByteTotal: number;
+  sources: CollectionSource[];
+  contributionCounts: RepositoryContributionCounts;
+  metadataFetchedAt: number;
 };
 
 export type RepoDetails = {
   name: string;
+  nameWithOwner: string;
   description: string | null;
   stars: number;
   forks: number;
@@ -98,7 +150,6 @@ export type TopicCount = {
 };
 
 export type ComputedStats = {
-  // Repo statistics
   totalRepos: number;
   publicRepos: number;
   privateRepos: number;
@@ -109,26 +160,237 @@ export type ComputedStats = {
   reposWithStars: number;
   reposCreatedThisYear: number;
   averageStarsPerRepo: number;
-
-  // Language statistics
   languageCount: number;
   primaryLanguage: string | null;
   primaryLanguageThisYear: string | null;
   topLanguagesThisYear: Language[];
-
-  // Topic statistics
   totalTopics: number;
   topTopics: TopicCount[];
   allTopics: string[];
-
-  // Contribution statistics
   contributionsThisYear: number;
   contributionsLastYear: number;
   yearOverYearGrowth: number | null;
   mostProductiveMonth: { month: string; contributions: number } | null;
 };
 
-export type UserStats = {
+export type ContributorStatsSummary = {
+  additions: number;
+  deletions: number;
+  commits: number;
+  fetchedAt: number;
+  defaultBranchOid: string | null;
+  status: "fresh" | "cached" | "pending" | "failed" | "skipped";
+  error?: string;
+};
+
+export type TrafficDay = {
+  timestamp: string;
+  count: number;
+  uniques: number;
+};
+
+export type TrafficSummary = {
+  count: number;
+  uniques: number;
+  days: TrafficDay[];
+  fetchedAt: number;
+  status: "fresh" | "cached" | "pending" | "failed" | "skipped";
+  error?: string;
+};
+
+export type BackfillItemType = "contributors" | "traffic";
+
+export type BackfillItem = {
+  key: string;
+  type: BackfillItemType;
+  repoId: string;
+  nameWithOwner: string;
+  priority: number;
+  reason: string;
+};
+
+export type BackfillFailure = {
+  key: string;
+  failedAt: number;
+  attempts: number;
+  message: string;
+};
+
+export type CachedContributionYear = {
+  year: string;
+  from: string;
+  to: string;
+  fetchedAt: number;
+  immutable: boolean;
+  data: ContributionsCollection;
+  repositoryContributions: RepositoryContributionSummary[];
+  repositories: RepositoryRecord[];
+};
+
+export type CachedRepository = {
+  fetchedAt: number;
+  repository: RepositoryRecord;
+};
+
+export type CachedContributorStats = ContributorStatsSummary;
+
+export type CachedTraffic = TrafficSummary;
+
+export type StableCache = {
+  schemaVersion: typeof CACHE_SCHEMA_VERSION;
+  updatedAt: number;
+  contributionYears: Record<string, CachedContributionYear>;
+  repositories: Record<string, CachedRepository>;
+  contributorStats: Record<string, CachedContributorStats>;
+  traffic: Record<string, CachedTraffic>;
+  backfill: {
+    pending: BackfillItem[];
+    completed: Record<string, number>;
+    failures: Record<string, BackfillFailure>;
+  };
+};
+
+export type CachedEtag = {
+  etag?: string;
+  lastModified?: string;
+  updatedAt: number;
+};
+
+export type VolatileCache = {
+  schemaVersion: typeof CACHE_SCHEMA_VERSION;
+  updatedAt: number;
+  restEtags: Record<string, CachedEtag>;
+};
+
+export type CollectionStatus = {
+  startedAt: number;
+  finishedAt: number;
+  durationMs: number;
+  complete: boolean;
+  coreComplete: boolean;
+  cache: {
+    stablePath: string;
+    volatilePath: string;
+    contributionYearsFromCache: number;
+    contributionYearsFetched: number;
+    repositoriesFromCache: number;
+    repositoriesFetched: number;
+  };
+  backfill: {
+    enabled: boolean;
+    completedThisRun: number;
+    pending: number;
+    failedThisRun: number;
+    skippedThisRun: number;
+  };
+  rateLimit: {
+    graphql: RateLimitInfo | null;
+    rest: RateLimitInfo | null;
+  };
+  warnings: string[];
+  errors: string[];
+};
+
+export type UserProfile = {
+  name: string;
+  login: string;
+  bio: string | null;
+  company: string | null;
+  location: string | null;
+  email: string | null;
+  twitterUsername: string | null;
+  websiteUrl: string | null;
+  avatarUrl: string;
+  createdAt: string;
+  followers: number;
+  following: number;
+};
+
+export type ActivityStats = {
+  totalPullRequests: number;
+  openIssues: number;
+  closedIssues: number;
+  repositoriesContributedTo: number;
+  discussionsStarted: number;
+  discussionsAnswered: number;
+  starsGiven: number;
+};
+
+export type RepositoryContributionSummary = {
+  repositoryId: string;
+  nameWithOwner: string;
+  owner: string;
+  counts: RepositoryContributionCounts;
+};
+
+export type ProfileContributions = {
+  totalContributions: number;
+  totalCommitContributions: number;
+  restrictedContributionsCount: number;
+  totalIssueContributions: number;
+  totalRepositoryContributions: number;
+  totalPullRequestContributions: number;
+  totalPullRequestReviewContributions: number;
+  contributionCalendar: ContributionsCollection["contributionCalendar"];
+  stats: ContributionStats;
+  repositoryContributions: RepositoryContributionSummary[];
+  completeness: {
+    complete: boolean;
+    yearsFetched: string[];
+    yearsFromCache: string[];
+    missingYears: string[];
+  };
+};
+
+export type RepoMetrics = {
+  starCount: number;
+  forkCount: number;
+  codeByteTotal: number;
+  topLanguages: Language[];
+  topTopics: TopicCount[];
+  contributorStats: {
+    totalCommits: number;
+    linesAdded: number;
+    linesDeleted: number;
+    linesOfCodeChanged: number;
+    reposCompleted: number;
+    reposPending: number;
+    reposFailed: number;
+  };
+  traffic: {
+    repoViews: number;
+    repoViewUniques: number;
+    reposCompleted: number;
+    reposPending: number;
+    reposFailed: number;
+  };
+  repoStats: RepoStats;
+  computedStats: ComputedStats;
+};
+
+export type PresentationData = {
+  readmeSummary: {
+    name: string;
+    username: string;
+    totalContributions: number;
+    currentStreak: number;
+    longestStreak: number;
+    topLanguages: Language[];
+    starsReceived: number;
+    forksReceived: number;
+    activeRepos: number;
+    refreshedAt: string;
+    complete: boolean;
+  };
+  cards: Array<{ id: string; label: string; value: string | number; detail?: string }>;
+  timeline: Array<{ period: string; contributions: number }>;
+  highlights: Array<{ id: string; label: string; value: string | number; detail?: string }>;
+  remotion: {
+    scenes: Array<{ id: string; title: string; metric: string | number; supportingText?: string }>;
+  };
+};
+
+export type LegacyStats = {
   name: string;
   username: string;
   avatarUrl: string;
@@ -168,62 +430,99 @@ export type UserStats = {
   topRepos: RepoDetails[];
 };
 
-export interface GraphQLResponse {
-  user: User;
-  viewer: Viewer;
-  rateLimit?: RateLimitInfo;
-}
+export type GitHubStatsOutput = LegacyStats & {
+  schemaVersion: typeof OUTPUT_SCHEMA_VERSION;
+  generatedAt: string;
+  profile: UserProfile;
+  profileContributions: ProfileContributions;
+  activity: ActivityStats;
+  repositories: RepositoryRecord[];
+  repoMetrics: RepoMetrics;
+  presentation: PresentationData;
+  collectionStatus: CollectionStatus;
+  legacy: LegacyStats;
+};
 
-export interface User {
-  name: string;
-  login: string;
-  repositories: Repositories;
-  pullRequests: PullRequests;
-}
-
-export interface Repositories {
-  totalCount: number;
-  nodes: Node[];
-}
-
-export interface Node {
-  stargazers: Stargazers;
-  name: string;
-  languages: Languages;
-  forkCount: number;
-}
-
-export interface Stargazers {
-  totalCount: number;
-}
-
-export interface Languages {
-  edges: Edge[];
-}
-
-export interface Edge {
+export type RawGraphQLLanguageEdge = {
   size: number;
-  node: Node2;
-}
+  node: {
+    color: string | null;
+    name: string;
+  };
+};
 
-export interface Node2 {
-  color: string;
+export type RawGraphQLRepository = {
+  id: string;
   name: string;
-}
+  nameWithOwner: string;
+  owner: {
+    login: string;
+    __typename?: string;
+  };
+  description: string | null;
+  url?: string | null;
+  isArchived: boolean;
+  isFork: boolean;
+  isPrivate: boolean;
+  visibility?: string | null;
+  viewerPermission?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  pushedAt?: string | null;
+  defaultBranchRef?: {
+    target?: {
+      oid?: string | null;
+    } | null;
+  } | null;
+  stargazers?: {
+    totalCount: number;
+  };
+  forkCount: number;
+  primaryLanguage: {
+    name: string;
+    color?: string | null;
+  } | null;
+  repositoryTopics: {
+    nodes: Array<{
+      topic: {
+        name: string;
+      };
+    }>;
+  };
+  languages: {
+    edges: RawGraphQLLanguageEdge[];
+  };
+};
 
-export interface PullRequests {
-  totalCount: number;
-}
+export type GraphQLContributionRepositoryGroup = {
+  repository: RawGraphQLRepository;
+  contributions: {
+    totalCount: number;
+  };
+};
 
-export interface Viewer {
-  openIssues: OpenIssues;
-  closedIssues: ClosedIssues;
-}
+export type GraphQLViewerProfile = {
+  name: string | null;
+  login: string;
+  bio: string | null;
+  company: string | null;
+  location: string | null;
+  email: string | null;
+  twitterUsername: string | null;
+  websiteUrl: string | null;
+  avatarUrl: string;
+  createdAt: string;
+  followers: { totalCount: number };
+  following: { totalCount: number };
+  starredRepositories: { totalCount: number };
+  pullRequests: { totalCount: number };
+  repositoriesContributedTo: { totalCount: number };
+  openIssues: { totalCount: number };
+  closedIssues: { totalCount: number };
+  repositoryDiscussions: { totalCount: number };
+  repositoryDiscussionComments: { totalCount: number };
+};
 
-export interface OpenIssues {
-  totalCount: number;
-}
-
-export interface ClosedIssues {
-  totalCount: number;
-}
+export type GraphQLResponse<T> = T & {
+  rateLimit?: RateLimitInfo;
+};

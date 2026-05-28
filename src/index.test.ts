@@ -6,7 +6,19 @@ import {
   calculateContributionStats,
   calculateComputedStats,
 } from "./index";
-import type { ContributionsCollection, Language, ContributionStats } from "./Types";
+import { cacheRepository, createEmptyStableCache, shouldReuseContributionYear } from "./cache";
+import { emptyContributionsCollection } from "./aggregate";
+import { buildBackfillQueue, mergeRepositories } from "./github";
+import { buildOutput } from "./output";
+import type {
+  ActionConfig,
+  CachedContributionYear,
+  CollectionStatus,
+  ContributionStats,
+  ContributionsCollection,
+  Language,
+  RepositoryRecord,
+} from "./Types";
 
 describe("formatBytes", () => {
   test("formats bytes correctly", () => {
@@ -237,6 +249,8 @@ describe("calculateComputedStats", () => {
     averagePerWeek: 0,
     averagePerMonth: 0,
     monthlyBreakdown,
+    yearlyBreakdown: [],
+    peakDay: null,
   });
 
   test("calculates repo statistics correctly", () => {
@@ -332,5 +346,284 @@ describe("calculateComputedStats", () => {
     // Top topics should be sorted by count
     expect(stats.topTopics[0]).toEqual({ name: "typescript", count: 2 });
     expect(stats.topTopics[1]).toEqual({ name: "automation", count: 2 });
+  });
+});
+
+describe("v2 collection helpers", () => {
+  const baseConfig: ActionConfig = {
+    outputPath: "github-user-stats.json",
+    cachePath: ".github-profile-stats/cache.json",
+    volatileCachePath: ".github-profile-stats/volatile-cache.json",
+    maxRuntimeSeconds: 480,
+    graphqlConcurrency: 2,
+    restConcurrency: 4,
+    minGraphqlRemaining: 500,
+    minRestRemaining: 750,
+    includeTraffic: true,
+    includeRestRepoStats: true,
+    backfillMode: "resume",
+  };
+
+  const createRepository = (
+    overrides: Partial<RepositoryRecord> = {}
+  ): RepositoryRecord => ({
+    id: "R_1",
+    name: "stats-action",
+    nameWithOwner: "LukeHagar/stats-action",
+    owner: "LukeHagar",
+    ownerType: "User",
+    description: null,
+    url: "https://github.com/LukeHagar/stats-action",
+    isArchived: false,
+    isFork: false,
+    isPrivate: false,
+    visibility: "PUBLIC",
+    viewerPermission: "ADMIN",
+    createdAt: "2024-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+    pushedAt: "2026-01-01T00:00:00Z",
+    defaultBranchOid: "abc123",
+    stars: 10,
+    forks: 2,
+    primaryLanguage: "TypeScript",
+    topics: ["github-action"],
+    languages: [
+      {
+        languageName: "TypeScript",
+        color: "#3178c6",
+        value: 1000,
+        percentage: 100,
+      },
+    ],
+    codeByteTotal: 1000,
+    sources: ["owned"],
+    contributionCounts: {
+      commits: 0,
+      issues: 0,
+      pullRequests: 0,
+      pullRequestReviews: 0,
+      repositoryCreations: 0,
+    },
+    metadataFetchedAt: 1000,
+    ...overrides,
+  });
+
+  test("merges repositories by id without duplicating contribution counts or sources", () => {
+    const first = createRepository({
+      sources: ["owned"],
+      contributionCounts: {
+        commits: 3,
+        issues: 0,
+        pullRequests: 1,
+        pullRequestReviews: 0,
+        repositoryCreations: 0,
+      },
+      metadataFetchedAt: 1000,
+    });
+    const second = createRepository({
+      sources: ["profile-contribution"],
+      stars: 20,
+      contributionCounts: {
+        commits: 2,
+        issues: 1,
+        pullRequests: 0,
+        pullRequestReviews: 4,
+        repositoryCreations: 0,
+      },
+      metadataFetchedAt: 2000,
+    });
+
+    const merged = mergeRepositories([first, second]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].stars).toBe(20);
+    expect(merged[0].sources.sort()).toEqual(["owned", "profile-contribution"]);
+    expect(merged[0].contributionCounts).toEqual({
+      commits: 5,
+      issues: 1,
+      pullRequests: 1,
+      pullRequestReviews: 4,
+      repositoryCreations: 0,
+    });
+  });
+
+  test("builds a resumable backfill queue only for stale optional metrics", () => {
+    const cache = createEmptyStableCache();
+    const repo = createRepository();
+    cache.contributorStats[repo.id] = {
+      additions: 10,
+      deletions: 2,
+      commits: 3,
+      fetchedAt: Date.now(),
+      defaultBranchOid: "old-sha",
+      status: "cached",
+    };
+
+    const queue = buildBackfillQueue([repo], cache, baseConfig);
+
+    expect(queue.map((item) => item.type).sort()).toEqual([
+      "contributors",
+      "traffic",
+    ]);
+    expect(queue[0].repoId).toBe(repo.id);
+  });
+
+  test("does not queue contributor stats when default branch oid is unchanged", () => {
+    const cache = createEmptyStableCache();
+    const repo = createRepository();
+    cache.contributorStats[repo.id] = {
+      additions: 10,
+      deletions: 2,
+      commits: 3,
+      fetchedAt: Date.now(),
+      defaultBranchOid: repo.defaultBranchOid,
+      status: "cached",
+    };
+    cache.traffic[repo.id] = {
+      count: 1,
+      uniques: 1,
+      days: [],
+      fetchedAt: Date.now(),
+      status: "cached",
+    };
+
+    expect(buildBackfillQueue([repo], cache, baseConfig)).toHaveLength(0);
+  });
+
+  test("reuses immutable cached contribution years but refreshes current years", () => {
+    const cached: CachedContributionYear = {
+      year: "2022",
+      from: "2022-01-01T00:00:00.000Z",
+      to: "2023-01-01T00:00:00.000Z",
+      fetchedAt: Date.now(),
+      immutable: true,
+      data: emptyContributionsCollection(),
+      repositoryContributions: [],
+      repositories: [],
+    };
+
+    expect(shouldReuseContributionYear(cached, 2022, 2026)).toBe(true);
+    expect(shouldReuseContributionYear({ ...cached, year: "2025" }, 2025, 2026)).toBe(false);
+  });
+
+  test("stores repository metadata without duplicating contribution counts in cache", () => {
+    const cache = createEmptyStableCache();
+    const repo = createRepository({
+      contributionCounts: {
+        commits: 10,
+        issues: 2,
+        pullRequests: 1,
+        pullRequestReviews: 0,
+        repositoryCreations: 0,
+      },
+    });
+
+    cacheRepository(cache, repo);
+
+    expect(cache.repositories[repo.id].repository.contributionCounts).toEqual({
+      commits: 0,
+      issues: 0,
+      pullRequests: 0,
+      pullRequestReviews: 0,
+      repositoryCreations: 0,
+    });
+  });
+
+  test("builds v2 output while preserving legacy top-level aliases", () => {
+    const cache = createEmptyStableCache();
+    const repo = createRepository();
+    cache.contributorStats[repo.id] = {
+      additions: 7,
+      deletions: 3,
+      commits: 2,
+      fetchedAt: Date.now(),
+      defaultBranchOid: repo.defaultBranchOid,
+      status: "fresh",
+    };
+
+    const collection: ContributionsCollection = {
+      ...emptyContributionsCollection(),
+      totalCommitContributions: 2,
+      contributionCalendar: {
+        totalContributions: 5,
+        weeks: [
+          {
+            contributionDays: [
+              { date: "2026-01-01", contributionCount: 2 },
+              { date: "2026-01-02", contributionCount: 3 },
+            ],
+          },
+        ],
+      },
+    };
+    const status: CollectionStatus = {
+      startedAt: 1,
+      finishedAt: 2,
+      durationMs: 1,
+      complete: true,
+      coreComplete: true,
+      cache: {
+        stablePath: "cache.json",
+        volatilePath: "volatile.json",
+        contributionYearsFromCache: 0,
+        contributionYearsFetched: 1,
+        repositoriesFromCache: 0,
+        repositoriesFetched: 1,
+      },
+      backfill: {
+        enabled: true,
+        completedThisRun: 1,
+        pending: 0,
+        failedThisRun: 0,
+        skippedThisRun: 0,
+      },
+      rateLimit: { graphql: null, rest: null },
+      warnings: [],
+      errors: [],
+    };
+
+    const output = buildOutput({
+      profile: {
+        name: "Luke Hagar",
+        login: "LukeHagar",
+        bio: null,
+        company: null,
+        location: null,
+        email: null,
+        twitterUsername: null,
+        websiteUrl: null,
+        avatarUrl: "https://example.com/avatar.png",
+        createdAt: "2020-01-01T00:00:00Z",
+        followers: 1,
+        following: 2,
+      },
+      activity: {
+        totalPullRequests: 4,
+        openIssues: 1,
+        closedIssues: 2,
+        repositoriesContributedTo: 3,
+        discussionsStarted: 0,
+        discussionsAnswered: 0,
+        starsGiven: 5,
+      },
+      contributions: {
+        collection,
+        repositoryContributions: [],
+        repositories: [repo],
+        yearsFetched: ["2026"],
+        yearsFromCache: [],
+        missingYears: [],
+      },
+      repositories: [repo],
+      cache,
+      collectionStatus: status,
+      fetchedAt: 1000,
+    });
+
+    expect(output.schemaVersion).toBe(2);
+    expect(output.totalContributions).toBe(output.legacy.totalContributions);
+    expect(output.profileContributions.totalContributions).toBe(5);
+    expect(output.repoMetrics.contributorStats.linesOfCodeChanged).toBe(10);
+    expect(output.presentation.readmeSummary.username).toBe("LukeHagar");
   });
 });
