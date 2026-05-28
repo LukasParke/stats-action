@@ -44,10 +44,47 @@ jobs:
         with:
           path: .
 
-      - name: Publish Draft Release if doesn't exist
+      - name: Publish Draft Release if needed
         run: |
-          if ! gh release view ${{ steps.package-info.outputs.version }} >/dev/null 2>&1; then
-            gh release create --draft ${{ steps.package-info.outputs.version }} --title "${{ steps.package-info.outputs.version }}" --generate-notes
+          set -euo pipefail
+
+          version="${{ steps.package-info.outputs.version }}"
+          if [[ ! "${version}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Package version must be a patch SemVer value, got: ${version}" >&2
+            exit 1
           fi
+
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
+          releases="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq '.[] | [.tag_name, (if .draft then "draft" else "published" end)] | @tsv')"
+          candidate="${version}"
+
+          while true; do
+            status="$(
+              printf '%s\n' "${releases}" \
+                | awk -F '\t' -v version="${candidate}" '$1 == version || $1 == "v" version { print $2; exit }'
+            )"
+
+            if [ "${status}" = "draft" ]; then
+              echo "Draft release already exists for ${candidate}"
+              exit 0
+            fi
+
+            if [ "${status}" = "published" ]; then
+              echo "Release ${candidate} is already published; checking next patch version"
+              patch=$((patch + 1))
+              candidate="${major}.${minor}.${patch}"
+              continue
+            fi
+
+            break
+          done
+
+          if [ "${candidate}" != "${version}" ]; then
+            echo "Creating draft release ${candidate} because ${version} has already been published"
+          fi
+
+          gh release create --draft "${candidate}" --title "${candidate}" --generate-notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
